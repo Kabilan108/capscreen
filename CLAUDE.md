@@ -14,7 +14,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a terminal-based screen recording application written in Go that captures video and audio simultaneously. The application uses:
 
-- **Bubble Tea framework** for the interactive TUI with state machine pattern
 - **FFmpeg** for video/audio recording and encoding
 - **X11/xrandr** for display detection and capture
 - **PulseAudio/pactl** for audio source management
@@ -35,4 +34,4 @@ The application requires these system commands to be available:
 
 ### Entry Point
 
-The main function in `main.go:346` handles CLI argument parsing and launches the Bubble Tea program. Recording output files are timestamped MP4 files saved to the current directory.
+The main function in `main.go:346` handles CLI argument parsing and provides the logic for the cli. Recording output files are timestamped MP4 files saved to the current directory.
