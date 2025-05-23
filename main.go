@@ -3,23 +3,59 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/fatih/color"
 )
 
-// utils
+type (
+	Display struct{ Name, Resolution, OffsetX, OffsetY string }
+	Source  struct{ Name, Status string }
+)
+
+var (
+	errorColor = color.New(color.FgRed, color.Bold)
+	flagColor  = color.New(color.FgGreen)
+	infoColor  = color.New(color.FgBlue)
+	warnColor  = color.New(color.FgYellow)
+)
+
+type Findable interface {
+	Index() string
+	String() string
+}
+
+type RecordOpts struct {
+	xdisplay  string
+	outpath   string
+	display   *Display
+	source    *Source
+	framerate string
+	quality   string
+	bitrate   string
+}
+
+type Recording struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stderr bytes.Buffer
+}
+
+func (d Display) Index() string { return d.Name }
+func (a Source) Index() string  { return a.Name }
+
+func (d Display) String() string { return fmt.Sprintf("%s\t%s", d.Name, d.Resolution) }
+func (a Source) String() string  { return fmt.Sprintf("%s\t%s", a.Name, a.Status) }
 
 func commandExists(cmd string) bool {
 	_, err := exec.LookPath(cmd)
@@ -51,7 +87,36 @@ func checkExecutables() bool {
 	return true
 }
 
-func getDisplays() ([]Display, error) {
+func validateDir(path string) error {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("directory %s does not exist", path)
+	} else if err != nil {
+		return err
+	} else if !info.IsDir() {
+		return fmt.Errorf("%s exists but is not a directory", path)
+	}
+	return nil
+}
+
+func newRecordingFile(parent string) (string, error) {
+	fn := fmt.Sprintf("%s.mp4", time.Now().Format("2006.01.02_03.04.05"))
+	if err := validateDir(parent); err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, fn), nil
+}
+
+func findItem[T Findable](items []T, name string) *T {
+	for _, i := range items {
+		if i.Index() == name {
+			return &i
+		}
+	}
+	return nil
+}
+
+func listDisplays() ([]Display, error) {
 	monitorLines, err := run("xrandr", "--listmonitors")
 	if err != nil {
 		return nil, err
@@ -90,7 +155,7 @@ func getDisplays() ([]Display, error) {
 	return displays, nil
 }
 
-func getSources() ([]Source, error) {
+func listSources() ([]Source, error) {
 	lines, err := run("pactl", "list", "sources", "short")
 	if err != nil {
 		return nil, err
@@ -106,267 +171,248 @@ func getSources() ([]Source, error) {
 	return sources, nil
 }
 
-// enums
+func updateTimer(start time.Time, done <-chan bool) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
-type state int
-
-const (
-	selectDisplay state = iota
-	selectSource
-	recording
-	done
-)
-
-// list.Item types
-
-type Display struct{ Name, Resolution, OffsetX, OffsetY string }
-
-func (d Display) Title() string       { return d.Name }
-func (d Display) Description() string { return d.Resolution }
-func (d Display) FilterValue() string { return d.Name }
-
-type Source struct{ Name, Status string }
-
-func (a Source) Title() string       { return a.Name }
-func (a Source) Description() string { return a.Status }
-func (a Source) FilterValue() string { return a.Name }
-
-// bubbletea
-
-var (
-	docStyle = lipgloss.NewStyle().Margin(1, 2)
-	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8"))
-)
-
-type (
-	displayLoadedMsg []Display
-	sourcesLoadedMsg []Source
-)
-
-type recordingMsg struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	err     error
-	outFile string
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			duration := time.Since(start)
+			minutes := int(duration.Minutes())
+			seconds := int(duration.Seconds()) % 60
+			fmt.Fprint(os.Stderr, "\r", infoColor.Sprintf("recording: "), fmt.Sprintf("%02d:%02d", minutes, seconds))
+		}
+	}
 }
 
-type ffmpegDoneMsg struct {
-	err error
-}
+func recordScreen(opts RecordOpts) (*Recording, error) {
+	args := []string{
+		"-f", "x11grab",
+		"-r", opts.framerate,
+		"-video_size", opts.display.Resolution,
+		"-i", fmt.Sprintf("%s.0+%s,%s", opts.xdisplay, opts.display.OffsetX, opts.display.OffsetY),
+	}
+	if opts.source != nil {
+		args = append(args, "-f", "pulse", "-i", opts.source.Name)
+	}
+	args = append(args, "-c:v", "libx264", "-preset", "ultrafast", "-crf", opts.quality, "-pix_fmt", "yuv420p")
+	if opts.source != nil {
+		args = append(args, "-c:a", "aac", "-b:a", opts.bitrate)
+	}
 
-type model struct {
-	state       state
-	xdisplay    string
-	sd          string // selected display
-	ss          string // selected source
-	displays    list.Model
-	sources     list.Model
-	outFile     string
-	ffmpegCmd   *exec.Cmd
-	ffmpegStdin io.WriteCloser
-	ffmpegErr   error
-	cancelRec   context.CancelFunc
-}
+	args = append(args, opts.outpath)
 
-func initialModel(xdisplay, selDisplay, selSource, outDir string) model {
-	dl := list.New([]list.Item{}, list.NewDefaultDelegate(), 200, 13)
-	sl := list.New([]list.Item{}, list.NewDefaultDelegate(), 200, 13)
-	dl.Title = "select display"
-	sl.Title = "select audio source"
-	return model{state: selectDisplay, xdisplay: xdisplay, displays: dl, sources: sl}
-}
+	cmd := exec.Command("ffmpeg", args...)
 
-func loadDisplays() tea.Msg {
-	disps, err := getDisplays()
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		// TODO: figure out how to print error w bubbletea
-		log.Fatal(err)
+		return nil, err
 	}
-	return displayLoadedMsg(disps)
-}
 
-func loadSources() tea.Msg {
-	sources, err := getSources()
-	if err != nil {
-		log.Fatal(err)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
-	return sourcesLoadedMsg(sources)
+
+	return &Recording{cmd, stdin, stderr}, nil
 }
-
-func startRecordingCmd(xdisplay string, d Display, s Source) tea.Cmd {
-	return func() tea.Msg {
-		output := fmt.Sprintf("%s.mp4", time.Now().Format("2006.01.02_03.04.05.mp4"))
-		args := []string{
-			"-f", "x11grab", "-video_size", d.Resolution, "-r", "30",
-			"-i", fmt.Sprintf("%s.0+%s,%s", xdisplay, d.OffsetX, d.OffsetY),
-			"-f", "pulse", "-i", s.Name,
-			"-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-pix_fmt", "yuv420p",
-			"-c:a", "aac", "-b:a", "192k", output,
-		}
-
-		cmd := exec.Command("ffmpeg", args...)
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			return recordingMsg{nil, nil, err, ""}
-		}
-
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Start(); err != nil {
-			return recordingMsg{nil, nil, err, ""}
-		}
-		return recordingMsg{cmd, stdin, nil, output}
-	}
-}
-
-func waitForFfmpegCmd(cmd *exec.Cmd) tea.Cmd {
-	return func() tea.Msg {
-		err := cmd.Wait()
-		return ffmpegDoneMsg{err}
-	}
-}
-
-func (m model) Init() tea.Cmd {
-	return loadDisplays
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch m.state {
-	case selectDisplay:
-		switch msg := msg.(type) {
-		case displayLoadedMsg:
-			items := make([]list.Item, len(msg))
-			for i, d := range msg {
-				items[i] = d
-			}
-			m.displays.SetItems(items)
-			return m, loadSources
-		case tea.KeyMsg:
-			switch key := msg.String(); key {
-			case "enter":
-				if d, ok := m.displays.SelectedItem().(Display); ok {
-					m.displays.Title = fmt.Sprintf("display: %s", d.Description())
-					m.state = selectSource
-					return m, loadSources
-				}
-			}
-		}
-		var cmd tea.Cmd
-		m.displays, cmd = m.displays.Update(msg)
-		return m, cmd
-
-	case selectSource:
-		switch msg := msg.(type) {
-		case sourcesLoadedMsg:
-			items := make([]list.Item, len(msg))
-			for i, s := range msg {
-				items[i] = s
-			}
-			m.sources.SetItems(items)
-			return m, nil
-		case tea.KeyMsg:
-			switch key := msg.String(); key {
-			case "enter":
-				if src, ok := m.sources.SelectedItem().(Source); ok {
-					disp := m.displays.SelectedItem().(Display)
-					m.state = recording
-					return m, startRecordingCmd(m.xdisplay, disp, src)
-				}
-			}
-		}
-		var cmd tea.Cmd
-		m.sources, cmd = m.sources.Update(msg)
-		return m, cmd
-
-	case recording:
-		switch msg := msg.(type) {
-		case recordingMsg:
-			m.ffmpegCmd = msg.cmd
-			m.ffmpegStdin = msg.stdin
-			m.outFile = msg.outFile
-			if msg.err != nil {
-				m.ffmpegErr = msg.err
-				m.state = done
-				return m, tea.Quit
-			}
-			return m, waitForFfmpegCmd(msg.cmd)
-		case ffmpegDoneMsg:
-			m.ffmpegErr = msg.err
-			m.state = done
-			return m, tea.Quit
-		case tea.KeyMsg:
-			if msg.String() == "ctrl+c" || msg.String() == "ctrl+d" {
-				if m.ffmpegStdin != nil {
-					io.WriteString(m.ffmpegStdin, "q\n")
-					m.ffmpegStdin.Close()
-					return m, tea.Quit
-				}
-			}
-		}
-		return m, nil
-
-	case done:
-		return m, tea.Quit
-	}
-	return m, nil
-}
-
-func (m model) View() string {
-	switch m.state {
-	case selectDisplay:
-		return m.displays.View()
-	case selectSource:
-		return m.sources.View()
-	case recording:
-		return lipgloss.NewStyle().Width(50).Render(
-			"Recording... press ctrl+c to stop\n",
-		)
-	case done:
-		if m.ffmpegErr == nil {
-			return fmt.Sprintf("✔  Saved as '%s'\n", m.outFile)
-		}
-		return fmt.Sprintf("✘  Error: %v\n", m.ffmpegErr)
-	}
-	return ""
-}
-
-// cli
-
-var (
-	selDisplay string
-	selSource  string
-	outDir     string
-	help       bool
-)
 
 func printUsage() {
-	fmt.Println(errStyle.Render("Usage: capscreen [-d|--display] [-s|--source] [-h|--help] [-o|--outdir]"))
+	fmt.Fprintln(os.Stderr, infoColor.Sprint("usage:"), "capscreen <command> [-h|--help]")
+	fmt.Fprintln(os.Stderr, infoColor.Sprint("commands:"))
+	fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("list-displays")+"  list available displays")
+	fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("list-sources")+"   list available audio sources")
+	fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("record")+"         start recording")
 }
 
-func main() {
-	flag.StringVar(&selDisplay, "d", "", "name of display to record")
-	flag.StringVar(&selDisplay, "display", "", "name of display to record")
-	flag.StringVar(&selSource, "s", "", "audio source to record from")
-	flag.StringVar(&selSource, "source", "", "audio source to record from")
-	flag.StringVar(&outDir, "o", "", "output directory for recording")
-	flag.StringVar(&outDir, "outdir", "", "output directory for recording")
-	flag.BoolVar(&help, "h", false, "show usage")
-	flag.BoolVar(&help, "help", false, "show usage")
+func listDisplaysCmd() {
+	displays, err := listDisplays()
+	if err != nil {
+		errorColor.Fprintf(os.Stderr, "Failed to list displays: %v\n", err)
+		os.Exit(1)
+	}
+	for _, d := range displays {
+		fmt.Println(d.String())
+	}
+	os.Exit(0)
+}
+
+func listSourcesCmd() {
+	sources, err := listSources()
+	if err != nil {
+		errorColor.Fprintf(os.Stderr, "Failed to list sources: %v\n", err)
+		os.Exit(1)
+	}
+	for _, s := range sources {
+		fmt.Println(s.String())
+	}
+	os.Exit(0)
+}
+
+func recordCmd() {
+	command := flag.NewFlagSet("record", flag.ExitOnError)
+
+	var dname, sname, output, framerate, quality, bitrate string
+	var help bool
+	command.StringVar(&dname, "d", "", "name of display to record")
+	command.StringVar(&dname, "display", "", "name of display to record")
+	command.StringVar(&sname, "s", "", "audio source to record from")
+	command.StringVar(&sname, "source", "", "audio source to record from")
+	command.StringVar(&output, "o", ".", "output directory for recording")
+	command.StringVar(&output, "outdir", ".", "output directory for recording")
+	command.StringVar(&framerate, "fr", "30", "frame rate for recording")
+	command.StringVar(&quality, "quality", "18", "video quality (0-51, lower = higher quality)")
+	command.StringVar(&bitrate, "bitrate", "192k", "audio bitrate")
+	command.BoolVar(&help, "h", false, "show usage")
+	command.BoolVar(&help, "help", false, "show usage")
+	command.Parse(os.Args[2:])
 
 	if help {
-		printUsage()
+		fmt.Fprintln(os.Stderr, infoColor.Sprint("usage:"), "capscreen record [-h|--help] [options]")
+		fmt.Fprintln(os.Stderr, infoColor.Sprint("options:"))
+		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("-d, --display")+" <display>  name of display to record")
+		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("-s, --source")+"  <source>   audio source to record from")
+		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("-o, --outdir")+"  <dir>      output directory for recording")
+		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("--fr")+"          <fps>      frame rate for recording (default: 30)")
+		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("--quality")+"     <crf>      video quality 0-51, lower = higher quality (default: 18)")
+		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("--bitrate")+"     <rate>     audio bitrate (default: 192k)")
+		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("-h, --help")+"               show usage")
+		os.Exit(0)
+	}
+
+	outpath, err := newRecordingFile(output)
+	if err != nil {
+		errorColor.Fprintf(os.Stderr, "Invalid output directory: %v\n", err)
 		os.Exit(1)
 	}
 
 	xdisplay := os.Getenv("DISPLAY")
 	if xdisplay == "" {
-		fmt.Println(errStyle.Render(fmt.Sprintf("Couldn't get $DISPLAY: '%s'", xdisplay)))
+		errorColor.Fprintf(os.Stderr, "Failed to get $DISPLAY\n")
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(initialModel(xdisplay, selDisplay, selSource, outDir))
-	if _, err := p.Run(); err != nil {
-		fmt.Println(errStyle.Render(fmt.Sprintf("Something went wrong: %s", err)))
+	// always get a display
+	var display *Display
+	displays, err := listDisplays()
+	if err != nil {
+		errorColor.Fprintf(os.Stderr, "Failed to list displays: %v\n", err)
+		os.Exit(1)
+	}
+	if dname == "" {
+		display = &displays[0]
+	} else {
+		display = findItem(displays, dname)
+	}
+	if display == nil {
+		errorColor.Fprintf(os.Stderr, "No such display: %s\n", dname)
+		os.Exit(1)
+	}
+
+	// only get a source if one was specified
+	var source *Source
+	if sname != "" {
+		sources, err := listSources()
+		if err != nil {
+			errorColor.Fprintf(os.Stderr, "Failed to list sources: %v\n", err)
+			os.Exit(1)
+		}
+		source = findItem(sources, sname)
+		if source == nil {
+			errorColor.Fprintf(os.Stderr, "No such source: %s\n", sname)
+			os.Exit(1)
+		}
+	}
+
+	opts := RecordOpts{xdisplay, outpath, display, source, framerate, quality, bitrate}
+	r, err := recordScreen(opts)
+	if err != nil {
+		errorColor.Fprintf(os.Stderr, "Failed to start recording: %v\n", err)
+		os.Exit(1)
+	}
+
+	sigChan := make(chan os.Signal, 1)
+	done := make(chan bool, 1)
+	timerDone := make(chan bool, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	start := time.Now()
+	go updateTimer(start, timerDone)
+
+	// Handle keyboard input for 'q'
+	go func() {
+		for {
+			var input string
+			fmt.Fscanf(os.Stdin, "%s", &input)
+			if input == "q" {
+				timerDone <- true
+				fmt.Fprint(os.Stderr, "\r", infoColor.Sprintf("recording: "), "stopped\n")
+				r.stdin.Write([]byte("q\n"))
+				r.stdin.Close()
+				done <- true
+				return
+			}
+		}
+	}()
+
+	// Handle Ctrl+C signal
+	go func() {
+		<-sigChan
+		timerDone <- true
+		fmt.Fprint(os.Stderr, "\r", infoColor.Sprintf("recording: "), "stopped\n")
+		r.stdin.Write([]byte("q\n"))
+		r.stdin.Close()
+		done <- true
+	}()
+
+	// Wait for either signal or natural completion
+	go func() {
+		err := r.cmd.Wait()
+		timerDone <- true
+		if err != nil && !strings.Contains(err.Error(), "exit status") {
+			fmt.Fprintf(os.Stderr, "\n")
+			errorColor.Fprintf(os.Stderr, "Recording failed: %v\n", err)
+			errorColor.Fprintf(os.Stderr, "FFmpeg stderr: %s\n", r.stderr.String())
+		}
+		done <- true
+	}()
+
+	<-done
+	abs, _ := filepath.Abs(opts.outpath)
+	fmt.Println(abs)
+	os.Exit(0)
+}
+
+func main() {
+	var help bool
+	flag.BoolVar(&help, "h", false, "show usage")
+	flag.BoolVar(&help, "help", false, "show usage")
+	flag.Parse()
+
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+	if help {
+		printUsage()
+		os.Exit(0)
+	}
+
+	switch os.Args[1] {
+	case "list-displays":
+		listDisplaysCmd()
+	case "list-sources":
+		listSourcesCmd()
+	case "record":
+		recordCmd()
+	default:
+		errorColor.Fprintf(os.Stderr, "Unknown command '%s'\n\n", os.Args[1])
+		printUsage()
 		os.Exit(1)
 	}
 }
