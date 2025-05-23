@@ -12,7 +12,7 @@
       version = "0.1.0";
       src = pkgs.fetchurl {
         url = "https://github.com/Kabilan108/capscreen/releases/download/v${version}/capscreen-linux-amd64.tar.gz";
-        sha256 = "sha256-KQNiZxg3RjXpBf9uJAmdhpba3fkL+FkPpBA05FTqcBA=";
+        sha256 = "sha256-8SCAOjdEDFnSBd37GOq/Ubp5B501Inx5WNS576lCq7M=";
       };
       installPhase = ''
         mkdir -p $out/bin
