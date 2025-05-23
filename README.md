@@ -60,11 +60,14 @@ capscreen record -o ~/recordings --quality 23 --fr 60
 ### recording options:
 - `-d, --display <display>` - display to record (default: first display)
 - `-s, --source <source>` - audio source (optional)
-- `-o, --outdir <dir>` - output directory (default: current directory)
+- `-o, --outdir <dir>` - output directory (default: current directory, or `$CAPSCREEN_OUTPUT_DIR` if set)
 - `--fr <fps>` - frame rate (default: 30)
 - `--quality <crf>` - video quality 0-51, lower = higher quality (default: 18)
 - `--bitrate <rate>` - audio bitrate (default: 192k)
 
+### environment variables:
+- `CAPSCREEN_OUTPUT_DIR` - default output directory for recordings
+
 ### stop recording:
-- press `ctrl+c` or type `q` and press enter
+- press `ctrl+c`
 - output files are saved as timestamped mp4 files (e.g., `2024.01.15_14.30.45.mp4`).

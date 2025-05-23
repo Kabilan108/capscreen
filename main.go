@@ -263,8 +263,12 @@ func recordCmd() {
 	command.StringVar(&dname, "display", "", "name of display to record")
 	command.StringVar(&sname, "s", "", "audio source to record from")
 	command.StringVar(&sname, "source", "", "audio source to record from")
-	command.StringVar(&output, "o", ".", "output directory for recording")
-	command.StringVar(&output, "outdir", ".", "output directory for recording")
+	defaultOutput := "."
+	if envDir := os.Getenv("CAPSCREEN_OUTPUT_DIR"); envDir != "" {
+		defaultOutput = envDir
+	}
+	command.StringVar(&output, "o", defaultOutput, "output directory for recording")
+	command.StringVar(&output, "outdir", defaultOutput, "output directory for recording")
 	command.StringVar(&framerate, "fr", "30", "frame rate for recording")
 	command.StringVar(&quality, "quality", "18", "video quality (0-51, lower = higher quality)")
 	command.StringVar(&bitrate, "bitrate", "192k", "audio bitrate")
@@ -344,21 +348,6 @@ func recordCmd() {
 	start := time.Now()
 	go updateTimer(start, timerDone)
 
-	// Handle keyboard input for 'q'
-	go func() {
-		for {
-			var input string
-			fmt.Fscanf(os.Stdin, "%s", &input)
-			if input == "q" {
-				timerDone <- true
-				fmt.Fprint(os.Stderr, "\r", infoColor.Sprintf("recording: "), "stopped\n")
-				r.stdin.Write([]byte("q\n"))
-				r.stdin.Close()
-				done <- true
-				return
-			}
-		}
-	}()
 
 	// Handle Ctrl+C signal
 	go func() {
