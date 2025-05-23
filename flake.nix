@@ -1,19 +1,33 @@
 {
-  description = "";
-
+  description = "terminal-based screen recorder for x11";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
-
   outputs = { self, nixpkgs }: let
     system = "x86_64-linux";
-    pkgs   = import nixpkgs { inherit system; };
+    pkgs = import nixpkgs { inherit system; };
   in {
-    devShell.${system} = pkgs.mkShell {
+    packages.${system}.default = pkgs.stdenv.mkDerivation rec {
+      pname = "capscreen";
+      version = "0.1.0";
+      src = pkgs.fetchurl {
+        url = "https://github.com/Kabilan108/capscreen/releases/download/v${version}/capscreen-linux-amd64.tar.gz";
+        sha256 = "sha256-KQNiZxg3RjXpBf9uJAmdhpba3fkL+FkPpBA05FTqcBA=";
+      };
+      installPhase = ''
+        mkdir -p $out/bin
+        cp bin/capscreen $out/bin/
+        chmod +x $out/bin/capscreen
+      '';
+    };
+    devShells.${system}.default = pkgs.mkShell {
       buildInputs = with pkgs; [
-        pkgs.nodejs_20
+        go
+        gopls
+        nodejs_20
+        xorg.xrandr
+        ffmpeg
       ];
-
       shellHook = ''
         export NPM_CONFIG_PREFIX="$HOME/.npm-global"
         export PATH="$HOME/.npm-global/bin:$PATH"
