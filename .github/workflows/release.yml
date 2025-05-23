@@ -23,17 +23,29 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
       - name: Build Linux Binary
         run: |
-          BINARY_NAME="capscreen_linux_amd64"
-          go build -ldflags="-s -w" -o $BINARY_NAME .
+          BINARY_NAME="capscreen"
+          go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" -o $BINARY_NAME .
         env:
           GOOS: linux
           GOARCH: amd64
 
-      - name: Create Release and Upload Binary
+      - name: Create tarball
+        run: |
+          mkdir -p capscreen-linux-amd64/bin
+          cp capscreen capscreen-linux-amd64/bin/
+          tar czf capscreen-linux-amd64.tar.gz capscreen-linux-amd64
+
+      - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: capscreen_linux_amd64
+          files: |
+            capscreen_linux_amd64
+            capscreen-linux-amd64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
