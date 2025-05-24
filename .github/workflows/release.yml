@@ -45,7 +45,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            capscreen_linux_amd64
             capscreen-linux-amd64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
