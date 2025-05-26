@@ -7,26 +7,34 @@
     system = "x86_64-linux";
     pkgs = import nixpkgs { inherit system; };
   in {
-    packages.${system}.default = pkgs.stdenv.mkDerivation rec {
+    packages.${system}.default = pkgs.buildGoModule rec {
       pname = "capscreen";
-      version = "0.1.1";
-      src = pkgs.fetchurl {
-        url = "https://github.com/Kabilan108/capscreen/releases/download/v${version}/capscreen-linux-amd64.tar.gz";
-        sha256 = "sha256-dsAsWE2zIcrCeYJi8RAUwiXvzGSgtbIGqsHJJSF9NgI=";
-      };
+      version = "latest";
+      src = ./.;
+
+      vendorHash = "sha256-HeEnr3GpFVvzGQOWZm4/Th5TKfU2Tyx756Hs3HhWv8g=";
+
+      buildPhase = ''
+        runHook preBuild
+        make build
+        runHook postBuild
+      '';
+
       installPhase = ''
+        runHook preInstall
         mkdir -p $out/bin
-        cp bin/capscreen $out/bin/
-        chmod +x $out/bin/capscreen
+        cp build/capscreen $out/bin/
+        runHook postInstall
       '';
     };
     devShells.${system}.default = pkgs.mkShell {
       buildInputs = with pkgs; [
+        self.packages.${system}.default
         go
         gopls
         nodejs_20
-        xorg.xrandr
         ffmpeg
+        xorg.xrandr
       ];
       shellHook = ''
         export NPM_CONFIG_PREFIX="$HOME/.npm-global"
