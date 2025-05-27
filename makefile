@@ -1,8 +1,8 @@
 build/capscreen: $(shell find . -name '*.go')
-	CGO_ENABLED=0 go build -ldflags="-s -w" -o build/capscreen .
+	go build -ldflags="-s -w" -o build/capscreen .
 
 build/capscreen-linux-amd64: $(shell find . -name '*.go')
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o build/capscreen-linux-amd64 .
+	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o build/capscreen-linux-amd64 .
 
 build: build/capscreen
 
