@@ -21,6 +21,11 @@ import (
 type (
 	Display struct{ Name, Resolution, OffsetX, OffsetY string }
 	Source  struct{ Name, Status string }
+	VideoStats struct {
+		Duration  string
+		FrameRate string
+		FileSize  string
+	}
 )
 
 var (
@@ -79,7 +84,7 @@ func run(name string, args ...string) ([]string, error) {
 }
 
 func checkExecutables() bool {
-	for _, cmd := range []string{"xrandr", "pactl", "ffmpeg"} {
+	for _, cmd := range []string{"xrandr", "pactl", "ffmpeg", "ffprobe"} {
 		if !commandExists(cmd) {
 			return false
 		}
@@ -186,6 +191,63 @@ func updateTimer(start time.Time, done <-chan bool) {
 			fmt.Fprint(os.Stderr, "\r", infoColor.Sprintf("recording: "), fmt.Sprintf("%02d:%02d", minutes, seconds))
 		}
 	}
+}
+
+func getVideoStats(filePath string) (*VideoStats, error) {
+	if !commandExists("ffprobe") {
+		return nil, fmt.Errorf("ffprobe not found")
+	}
+
+	// Get file size
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info: %v", err)
+	}
+	
+	fileSizeMB := float64(fileInfo.Size()) / (1024 * 1024)
+	var sizeStr string
+	if fileSizeMB >= 1024 {
+		sizeStr = fmt.Sprintf("%.2f GB", fileSizeMB/1024)
+	} else {
+		sizeStr = fmt.Sprintf("%.2f MB", fileSizeMB)
+	}
+
+	// Get duration using ffprobe
+	durationCmd := exec.Command("ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", filePath)
+	durationOutput, err := durationCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get duration: %v", err)
+	}
+	
+	durationStr := strings.TrimSpace(string(durationOutput))
+	if durationFloat, err := time.ParseDuration(durationStr + "s"); err == nil {
+		minutes := int(durationFloat.Minutes())
+		seconds := int(durationFloat.Seconds()) % 60
+		durationStr = fmt.Sprintf("%02d:%02d", minutes, seconds)
+	}
+
+	// Get frame rate using ffprobe
+	framerateCmd := exec.Command("ffprobe", "-v", "quiet", "-show_entries", "stream=r_frame_rate", "-select_streams", "v:0", "-of", "csv=p=0", filePath)
+	framerateOutput, err := framerateCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get frame rate: %v", err)
+	}
+	
+	framerateStr := strings.TrimSpace(string(framerateOutput))
+	// Parse fraction like "30/1" to "30 fps"
+	if parts := strings.Split(framerateStr, "/"); len(parts) == 2 {
+		if parts[1] == "1" {
+			framerateStr = parts[0] + " fps"
+		} else {
+			framerateStr = framerateStr + " fps"
+		}
+	}
+
+	return &VideoStats{
+		Duration:  durationStr,
+		FrameRate: framerateStr,
+		FileSize:  sizeStr,
+	}, nil
 }
 
 func recordScreen(opts RecordOpts) (*Recording, error) {
@@ -374,6 +436,18 @@ func recordCmd() {
 	<-done
 	abs, _ := filepath.Abs(opts.outpath)
 	fmt.Println(abs)
+	
+	// Display video statistics
+	if stats, err := getVideoStats(opts.outpath); err == nil {
+		fmt.Println()
+		fmt.Println(infoColor.Sprint("Video Statistics:"))
+		fmt.Printf("  Duration:    %s\n", stats.Duration)
+		fmt.Printf("  Frame Rate:  %s\n", stats.FrameRate)
+		fmt.Printf("  File Size:   %s\n", stats.FileSize)
+	} else {
+		warnColor.Fprintf(os.Stderr, "Warning: Could not get video statistics: %v\n", err)
+	}
+	
 	os.Exit(0)
 }
 
