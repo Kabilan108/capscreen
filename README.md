@@ -6,7 +6,7 @@ basically a convenient wrapper around [ffmpeg](https://ffmpeg.org/).
 ## requirements
 
 - x11 display server
-- ffmpeg
+- ffmpeg (including `ffprobe` for video statistics)
 - pulseaudio (`pactl` command)
 - xrandr (x11 display utilities)
 
@@ -71,3 +71,21 @@ capscreen record -o ~/recordings --quality 23 --fr 60
 ### stop recording:
 - press `ctrl+c`
 - output files are saved as timestamped mp4 files (e.g., `2024.01.15_14.30.45.mp4`).
+
+### video statistics:
+after recording completion, capscreen automatically displays video statistics including:
+- **duration** - total recording length (mm:ss format)
+- **frame rate** - actual fps of the recorded video
+- **file size** - size of the output file (automatically formatted in mb/gb)
+
+example output:
+```
+recording saved: /home/user/2024.01.15_14.30.45.mp4
+
+video statistics:
+  duration:    02:34
+  frame rate:  30 fps
+  file size:   45.67 mb
+```
+
+*note: video statistics require `ffprobe` (part of ffmpeg) to be installed. if not available, a warning will be shown instead.*
