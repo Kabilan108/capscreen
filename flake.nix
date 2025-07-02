@@ -32,17 +32,9 @@
         self.packages.${system}.default
         go
         gopls
-        nodejs_20
         ffmpeg
         xorg.xrandr
       ];
-      shellHook = ''
-        export NPM_CONFIG_PREFIX="$HOME/.npm-global"
-        export PATH="$HOME/.npm-global/bin:$PATH"
-        if [ ! -f "$HOME/.npm-global/bin/claude" ]; then
-          npm install -g @anthropic-ai/claude-code
-        fi
-      '';
     };
   };
 }
