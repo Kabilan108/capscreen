@@ -39,7 +39,7 @@ type RecordOpts struct {
 	xdisplay  string
 	outpath   string
 	display   *Display
-	source    *Source
+	sources   []*Source
 	framerate string
 	quality   string
 	bitrate   string
@@ -195,12 +195,28 @@ func recordScreen(opts RecordOpts) (*Recording, error) {
 		"-video_size", opts.display.Resolution,
 		"-i", fmt.Sprintf("%s.0+%s,%s", opts.xdisplay, opts.display.OffsetX, opts.display.OffsetY),
 	}
-	if opts.source != nil {
-		args = append(args, "-f", "pulse", "-i", opts.source.Name)
+	
+	// Add multiple audio sources
+	for _, source := range opts.sources {
+		args = append(args, "-f", "pulse", "-i", source.Name)
 	}
+	
 	args = append(args, "-c:v", "libx264", "-preset", "ultrafast", "-crf", opts.quality, "-pix_fmt", "yuv420p")
-	if opts.source != nil {
+	
+	// Add audio codec settings if we have audio sources
+	if len(opts.sources) > 0 {
 		args = append(args, "-c:a", "aac", "-b:a", opts.bitrate)
+		
+		// If multiple audio sources, mix them
+		if len(opts.sources) > 1 {
+			// Create filter to mix multiple audio inputs
+			filterInputs := make([]string, len(opts.sources))
+			for i := range opts.sources {
+				filterInputs[i] = fmt.Sprintf("[%d:a]", i+1) // Video is input 0, audio starts at 1
+			}
+			mixFilter := fmt.Sprintf("%samix=inputs=%d[a]", strings.Join(filterInputs, ""), len(opts.sources))
+			args = append(args, "-filter_complex", mixFilter, "-map", "0:v", "-map", "[a]")
+		}
 	}
 
 	args = append(args, opts.outpath)
@@ -257,12 +273,21 @@ func listSourcesCmd() {
 func recordCmd() {
 	command := flag.NewFlagSet("record", flag.ExitOnError)
 
-	var dname, sname, output, framerate, quality, bitrate string
+	var dname, output, framerate, quality, bitrate string
+	var snames []string
 	var help bool
 	command.StringVar(&dname, "d", "", "name of display to record")
 	command.StringVar(&dname, "display", "", "name of display to record")
-	command.StringVar(&sname, "s", "", "audio source to record from")
-	command.StringVar(&sname, "source", "", "audio source to record from")
+	
+	// Custom flag handler for multiple sources
+	command.Func("s", "audio source to record from (can be used multiple times)", func(value string) error {
+		snames = append(snames, value)
+		return nil
+	})
+	command.Func("source", "audio source to record from (can be used multiple times)", func(value string) error {
+		snames = append(snames, value)
+		return nil
+	})
 	defaultOutput := "."
 	if envDir := os.Getenv("CAPSCREEN_OUTPUT_DIR"); envDir != "" {
 		defaultOutput = envDir
@@ -280,7 +305,7 @@ func recordCmd() {
 		fmt.Fprintln(os.Stderr, infoColor.Sprint("usage:"), "capscreen record [-h|--help] [options]")
 		fmt.Fprintln(os.Stderr, infoColor.Sprint("options:"))
 		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("-d, --display")+" <display>  name of display to record")
-		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("-s, --source")+"  <source>   audio source to record from")
+		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("-s, --source")+"  <source>   audio source to record from (can be used multiple times)")
 		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("-o, --outdir")+"  <dir>      output directory for recording")
 		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("--fr")+"          <fps>      frame rate for recording (default: 30)")
 		fmt.Fprintln(os.Stderr, "  "+flagColor.Sprint("--quality")+"     <crf>      video quality 0-51, lower = higher quality (default: 18)")
@@ -318,22 +343,26 @@ func recordCmd() {
 		os.Exit(1)
 	}
 
-	// only get a source if one was specified
-	var source *Source
-	if sname != "" {
-		sources, err := listSources()
+	// validate and collect all specified sources
+	var sources []*Source
+	if len(snames) > 0 {
+		availableSources, err := listSources()
 		if err != nil {
 			errorColor.Fprintf(os.Stderr, "Failed to list sources: %v\n", err)
 			os.Exit(1)
 		}
-		source = findItem(sources, sname)
-		if source == nil {
-			errorColor.Fprintf(os.Stderr, "No such source: %s\n", sname)
-			os.Exit(1)
+		
+		for _, sname := range snames {
+			source := findItem(availableSources, sname)
+			if source == nil {
+				errorColor.Fprintf(os.Stderr, "No such source: %s\n", sname)
+				os.Exit(1)
+			}
+			sources = append(sources, source)
 		}
 	}
 
-	opts := RecordOpts{xdisplay, outpath, display, source, framerate, quality, bitrate}
+	opts := RecordOpts{xdisplay, outpath, display, sources, framerate, quality, bitrate}
 	r, err := recordScreen(opts)
 	if err != nil {
 		errorColor.Fprintf(os.Stderr, "Failed to start recording: %v\n", err)
