@@ -1,5 +1,5 @@
 {
-  description = "terminal-based screen recorder for x11";
+  description = "terminal-based screen recorder for x11 and wayland (hyprland)";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
@@ -32,8 +32,11 @@
         self.packages.${system}.default
         go
         gopls
+        # x11 backend
         ffmpeg
         xorg.xrandr
+        # wayland/hyprland backend
+        wf-recorder
       ];
     };
   };

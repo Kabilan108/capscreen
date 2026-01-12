@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +24,28 @@ type (
 	Source  struct{ Name, Status string }
 )
 
+type Backend int
+
+const (
+	BackendX11 Backend = iota
+	BackendHyprland
+)
+
+type hyprMonitor struct {
+	Name   string `json:"name"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
+}
+
+func detectBackend() Backend {
+	if os.Getenv("HYPRLAND_INSTANCE_SIGNATURE") != "" {
+		return BackendHyprland
+	}
+	return BackendX11
+}
+
 var (
 	errorColor = color.New(color.FgRed, color.Bold)
 	flagColor  = color.New(color.FgGreen)
@@ -36,6 +59,7 @@ type Findable interface {
 }
 
 type RecordOpts struct {
+	backend   Backend
 	xdisplay  string
 	outpath   string
 	display   *Display
@@ -78,8 +102,16 @@ func run(name string, args ...string) ([]string, error) {
 	return lines, nil
 }
 
-func checkExecutables() bool {
-	for _, cmd := range []string{"xrandr", "pactl", "ffmpeg"} {
+func checkExecutables(backend Backend) bool {
+	common := []string{"pactl"}
+	var specific []string
+	switch backend {
+	case BackendHyprland:
+		specific = []string{"hyprctl", "wf-recorder"}
+	default:
+		specific = []string{"xrandr", "ffmpeg"}
+	}
+	for _, cmd := range append(common, specific...) {
 		if !commandExists(cmd) {
 			return false
 		}
@@ -116,7 +148,16 @@ func findItem[T Findable](items []T, name string) *T {
 	return nil
 }
 
-func listDisplays() ([]Display, error) {
+func listDisplays(backend Backend) ([]Display, error) {
+	switch backend {
+	case BackendHyprland:
+		return listDisplaysHyprland()
+	default:
+		return listDisplaysX11()
+	}
+}
+
+func listDisplaysX11() ([]Display, error) {
 	monitorLines, err := run("xrandr", "--listmonitors")
 	if err != nil {
 		return nil, err
@@ -149,6 +190,35 @@ func listDisplays() ([]Display, error) {
 			}
 		}
 	}
+	if len(displays) == 0 {
+		return nil, fmt.Errorf("no displays found")
+	}
+	return displays, nil
+}
+
+func listDisplaysHyprland() ([]Display, error) {
+	cmd := exec.Command("hyprctl", "monitors", "-j")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+
+	var monitors []hyprMonitor
+	if err := json.Unmarshal(out.Bytes(), &monitors); err != nil {
+		return nil, err
+	}
+
+	var displays []Display
+	for _, m := range monitors {
+		displays = append(displays, Display{
+			Name:       m.Name,
+			Resolution: fmt.Sprintf("%dx%d", m.Width, m.Height),
+			OffsetX:    fmt.Sprintf("%d", m.X),
+			OffsetY:    fmt.Sprintf("%d", m.Y),
+		})
+	}
+
 	if len(displays) == 0 {
 		return nil, fmt.Errorf("no displays found")
 	}
@@ -189,6 +259,15 @@ func updateTimer(start time.Time, done <-chan bool) {
 }
 
 func recordScreen(opts RecordOpts) (*Recording, error) {
+	switch opts.backend {
+	case BackendHyprland:
+		return recordScreenWayland(opts)
+	default:
+		return recordScreenX11(opts)
+	}
+}
+
+func recordScreenX11(opts RecordOpts) (*Recording, error) {
 	args := []string{
 		"-f", "x11grab",
 		"-r", opts.framerate,
@@ -222,6 +301,36 @@ func recordScreen(opts RecordOpts) (*Recording, error) {
 	return &Recording{cmd, stdin, stderr}, nil
 }
 
+func recordScreenWayland(opts RecordOpts) (*Recording, error) {
+	args := []string{
+		"-o", opts.display.Name,
+		"-r", opts.framerate,
+		"-c", "libx264",
+		"-p", "preset=ultrafast",
+		"-p", fmt.Sprintf("crf=%s", opts.quality),
+		"-f", opts.outpath,
+	}
+	if opts.source != nil {
+		args = append(args, "-a", opts.source.Name)
+	}
+
+	cmd := exec.Command("wf-recorder", args...)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	return &Recording{cmd, stdin, stderr}, nil
+}
+
 func printUsage() {
 	fmt.Fprintln(os.Stderr, infoColor.Sprint("usage:"), "capscreen <command> [-h|--help]")
 	fmt.Fprintln(os.Stderr, infoColor.Sprint("commands:"))
@@ -231,7 +340,8 @@ func printUsage() {
 }
 
 func listDisplaysCmd() {
-	displays, err := listDisplays()
+	backend := detectBackend()
+	displays, err := listDisplays(backend)
 	if err != nil {
 		errorColor.Fprintf(os.Stderr, "Failed to list displays: %v\n", err)
 		os.Exit(1)
@@ -295,15 +405,19 @@ func recordCmd() {
 		os.Exit(1)
 	}
 
-	xdisplay := os.Getenv("DISPLAY")
-	if xdisplay == "" {
-		errorColor.Fprintf(os.Stderr, "Failed to get $DISPLAY\n")
-		os.Exit(1)
+	backend := detectBackend()
+
+	var xdisplay string
+	if backend == BackendX11 {
+		xdisplay = os.Getenv("DISPLAY")
+		if xdisplay == "" {
+			errorColor.Fprintf(os.Stderr, "Failed to get $DISPLAY\n")
+			os.Exit(1)
+		}
 	}
 
-	// always get a display
 	var display *Display
-	displays, err := listDisplays()
+	displays, err := listDisplays(backend)
 	if err != nil {
 		errorColor.Fprintf(os.Stderr, "Failed to list displays: %v\n", err)
 		os.Exit(1)
@@ -333,7 +447,16 @@ func recordCmd() {
 		}
 	}
 
-	opts := RecordOpts{xdisplay, outpath, display, source, framerate, quality, bitrate}
+	opts := RecordOpts{
+		backend:   backend,
+		xdisplay:  xdisplay,
+		outpath:   outpath,
+		display:   display,
+		source:    source,
+		framerate: framerate,
+		quality:   quality,
+		bitrate:   bitrate,
+	}
 	r, err := recordScreen(opts)
 	if err != nil {
 		errorColor.Fprintf(os.Stderr, "Failed to start recording: %v\n", err)
@@ -354,8 +477,12 @@ func recordCmd() {
 		<-sigChan
 		timerDone <- true
 		fmt.Fprint(os.Stderr, "\r", infoColor.Sprintf("recording: "), "stopped\n")
-		r.stdin.Write([]byte("q\n"))
-		r.stdin.Close()
+		if backend == BackendHyprland {
+			r.cmd.Process.Signal(os.Interrupt)
+		} else {
+			r.stdin.Write([]byte("q\n"))
+			r.stdin.Close()
+		}
 		done <- true
 	}()
 
@@ -366,7 +493,7 @@ func recordCmd() {
 		if err != nil && !strings.Contains(err.Error(), "exit status") {
 			fmt.Fprintf(os.Stderr, "\n")
 			errorColor.Fprintf(os.Stderr, "Recording failed: %v\n", err)
-			errorColor.Fprintf(os.Stderr, "FFmpeg stderr: %s\n", r.stderr.String())
+			errorColor.Fprintf(os.Stderr, "Recorder stderr: %s\n", r.stderr.String())
 		}
 		done <- true
 	}()
